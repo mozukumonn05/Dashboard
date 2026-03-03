@@ -238,45 +238,72 @@ const App = () => {
     }
   };
 
-  // --- Main Logic: File Upload & Parse ---
-  const handleFileUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    if (xlsxStatus !== "ready" && typeof window.XLSX === 'undefined') return;
+// --- Main Logic: File Upload & Parse ---
+const handleFileUpload = async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
 
-    setUploadStatus("loading");
-    setUploadMessage("解析中...");
+  // --- 【予防策1】確認ダイアログ ---
+  const confirmMsg = `【確認】\n現在「${selectedCity}」が選択されています。\nアップロードしたファイルで「${selectedCity}」のデータを上書きしてもよろしいですか？`;
+  if (!window.confirm(confirmMsg)) {
+      e.target.value = ""; // 選択をリセット
+      return;
+  }
 
-    try {
-      const data = await file.arrayBuffer();
-      const workbook = window.XLSX.read(data);
-      const sheetName = workbook.SheetNames[0];
-      const sheet = workbook.Sheets[sheetName];
-      const json = window.XLSX.utils.sheet_to_json(sheet, { header: 1 });
+  if (xlsxStatus !== "ready" && typeof window.XLSX === 'undefined') return;
 
-      // === 分岐処理 ===
-      const titleRow = json[0] ? json[0].join('') : '';
+  setUploadStatus("loading");
+  setUploadMessage("解析中...");
 
-      // 大洗町フォーマット (タイトル行に含まれる文字列で判定)
-      if (selectedCity === '大洗町' || titleRow.includes('寄附方法年度別集計') || titleRow.includes('寄附方法別集計')) {
-          await processOaraiFormat(json, titleRow);
-      } else {
-          // 他自治体用フォーマット
-          if (file.name.includes('月別')) {
-              await processNewMonthlyFormat(json);
-          } else if (file.name.includes('日毎') || file.name.includes('日別')) {
-              await processNewDailyFormat(json);
-          } else {
-              throw new Error("不明なファイル形式です。");
-          }
-      }
+  try {
+    const data = await file.arrayBuffer();
+    const workbook = window.XLSX.read(data);
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const json = window.XLSX.utils.sheet_to_json(sheet, { header: 1 });
 
-    } catch (error) {
-      console.error(error);
-      setUploadStatus("error");
-      setUploadMessage(`エラー: ${error.message || "解析失敗"}`);
+    // --- 【予防策2 & 3】自治体一致チェック ---
+    const titleRow = json[0] ? json[0].join('') : '';
+    const allTextInFile = json.slice(0, 10).map(row => row.join('')).join(''); // 最初の10行を全スキャン
+
+    // 他の自治体名が含まれていないかチェック
+    const otherCities = summaryData.map(c => c.name).filter(name => name !== selectedCity);
+    const detectedOtherCity = otherCities.find(name => 
+        allTextInFile.includes(name) || file.name.includes(name)
+    );
+
+    if (detectedOtherCity) {
+        throw new Error(`自治体不一致の可能性があります。\n選択中: ${selectedCity}\n検出された名前: ${detectedOtherCity}\n正しい自治体を選択してから再度お試しください。`);
     }
-  };
+
+    // === 分岐処理 ===
+    // 大洗町フォーマット (タイトル行に含まれる文字列で判定)
+    if (selectedCity === '大洗町' || titleRow.includes('寄附方法年度別集計') || titleRow.includes('寄附方法別集計')) {
+        // 大洗町なのに他自治体のフォーマットっぽければ警告（逆も然り）
+        if (selectedCity !== '大洗町' && titleRow.includes('寄附方法')) {
+            throw new Error("このファイルは大洗町専用フォーマットの可能性があります。");
+        }
+        await processOaraiFormat(json, titleRow);
+    } else {
+        // 他自治体用フォーマット
+        if (file.name.includes('月別')) {
+            await processNewMonthlyFormat(json);
+        } else if (file.name.includes('日毎') || file.name.includes('日別')) {
+            await processNewDailyFormat(json);
+        } else {
+            throw new Error("不明なファイル形式です。");
+        }
+    }
+
+  } catch (error) {
+    console.error(error);
+    setUploadStatus("error");
+    setUploadMessage(`エラー: ${error.message || "解析失敗"}`);
+    alert(error.message); // ユーザーに警告を通知
+  } finally {
+    e.target.value = ""; // 次回同じファイルを選べるようにリセット
+  }
+};
 
   // --- 大洗町専用フォーマット処理 ---
   const processOaraiFormat = async (json, titleRow) => {
