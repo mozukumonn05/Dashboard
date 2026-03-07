@@ -1,5 +1,4 @@
-// --- 修正版 App.js 抜粋（主要部分のみ。全体を差し替えてください） ---
-
+// --- 修正版 App.js (全文) ---
 import React, { useState, useEffect, useCallback } from 'react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, 
@@ -8,18 +7,16 @@ import {
 import { 
   LayoutDashboard, TrendingUp, DollarSign, Calendar, Upload, 
   FileSpreadsheet, Target, ChevronRight, Menu, X, Activity, AlertCircle, CheckCircle, BarChart2, PieChart as PieChartIcon,
-  ChevronLeft, Database, Cloud, RefreshCw, Sparkles, Bot
+  ChevronLeft, Database, Cloud, RefreshCw
 } from 'lucide-react';
-
-// --- Firebase系 (既存と同じ) ---
 import { initializeApp } from "firebase/app";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
 import { getFirestore, collection, doc, setDoc, getDoc, getDocs, writeBatch } from "firebase/firestore";
 
+// --- 定数 ---
 const FISCAL_YEAR_MONTHS = ['4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月', '1月', '2月', '3月'];
 const MONTHS_ORDER = [4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3];
-const CURRENT_FISCAL_YEAR = 2025;
-const PLATFORM_KEYWORDS = ['楽天', 'ふるさとチョイス', 'さとふる', 'ふるなび', 'ANA', 'au PAY', '三越伊勢丹', 'JRE', 'JAL', 'マイナビ', 'セゾン', 'モンベル', 'ふるラボ', 'まいふる', 'Amazon'];
+const PLATFORM_KEYWORDS = ['楽天', 'チョイス', 'さとふる', 'ふるなび', 'ANA', 'au PAY', '三越伊勢丹', 'JRE', 'JAL', 'マイナビ', 'セゾン', 'モンベル', 'ふるラボ', 'まいふる', 'Amazon'];
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4'];
 
 const formatCurrency = (v) => {
@@ -69,8 +66,9 @@ const App = () => {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isTestMode, setIsTestMode] = useState(true);
   const [dbStatus, setDbStatus] = useState('idle');
+  const [uploadMsg, setUploadMsg] = useState('');
 
-  // 初期化：すべての自治体の詳細データをセット
+  // 詳細データの初期化
   useEffect(() => {
     const initialDetails = {};
     INITIAL_SUMMARY_DATA.forEach(city => {
@@ -109,7 +107,10 @@ const App = () => {
   }, [loadFromFirestore]);
 
   const saveToFirestore = async (newSummary, newDetails, targetCity) => {
-    if (isTestMode) return;
+    if (isTestMode) {
+      console.log("【テストモード】保存をスキップしました:", targetCity);
+      return;
+    }
     setDbStatus("saving");
     try {
       const batch = writeBatch(db);
@@ -121,87 +122,112 @@ const App = () => {
     } catch (e) { setDbStatus("error"); }
   };
 
-  // --- 解析ロジック (大洗町特化) ---
-  const processOaraiFormat = async (json, titleRow) => {
-    const yearMatch = titleRow.match(/(20\d{2}|令和\d+)/);
-    const fiscalYear = yearMatch && yearMatch[0].includes('令和') ? 2018 + parseInt(yearMatch[0].replace(/\D/g, '')) : 2025;
-    
-    const isMonthly = titleRow.includes('年度別集計');
-    const cityData = { ...detailData[selectedCity] };
+  // --- 解析コアロジック ---
+  const normalizeMonth = (val) => {
+    const m = String(val).replace(/\D/g, '');
+    return m ? `${parseInt(m)}月` : null;
+  };
 
-    if (isMonthly) {
-      const newMonthly = [...cityData.monthly];
-      for (let i = 3; i < json.length; i++) {
-        const row = json[i];
-        if (!row || isNaN(parseInt(row[0]))) continue;
-        const monthStr = `${parseInt(row[0])}月`;
-        const amount = typeof row[2] === 'number' ? row[2] : parseFloat(String(row[2]).replace(/,/g, '')) || 0;
-        
-        const idx = newMonthly.findIndex(m => m.month === monthStr);
-        if (idx !== -1) {
-          if (fiscalYear === 2025) newMonthly[idx].thisYear = amount;
-          else if (fiscalYear === 2024) newMonthly[idx].lastYear = amount;
-          else if (fiscalYear === 2023) newMonthly[idx].prevYear = amount;
-          
-          if (newMonthly[idx].lastYear > 0) {
-            newMonthly[idx].yoyRate = parseFloat(((newMonthly[idx].thisYear / newMonthly[idx].lastYear) * 100).toFixed(1));
-          }
-        }
-      }
-      cityData.monthly = newMonthly;
-      const totalCurrent = newMonthly.reduce((s, m) => s + m.thisYear, 0);
-      const updatedSummary = summaryData.map(c => c.name === selectedCity ? { ...c, current: totalCurrent, achievement: c.target > 0 ? Math.round((totalCurrent/c.target)*100) : 0 } : c);
-      
-      setDetailData(prev => ({ ...prev, [selectedCity]: cityData }));
-      setSummaryData(updatedSummary);
-      await saveToFirestore(updatedSummary, { [selectedCity]: cityData }, selectedCity);
-    }
+  const cleanNum = (val) => {
+    if (typeof val === 'number') return val;
+    return parseFloat(String(val).replace(/,/g, '')) || 0;
   };
 
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    if (!window.confirm(`${selectedCity} のデータを更新しますか？`)) return;
+    if (!window.confirm(`${selectedCity} のデータを読み込みますか？`)) return;
 
+    setUploadMsg('解析中...');
     const reader = new FileReader();
     reader.onload = async (evt) => {
-      const bstr = evt.target.result;
-      const wb = window.XLSX.read(bstr, { type: 'binary' });
-      const json = window.XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
-      const title = json[0] ? json[0].join('') : '';
-      
-      if (selectedCity === '大洗町' || title.includes('寄附方法')) {
-        await processOaraiFormat(json, title);
+      try {
+        const bstr = evt.target.result;
+        const wb = window.XLSX.read(bstr, { type: 'binary' });
+        const json = window.XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+        
+        console.log("ファイル読み込み完了:", file.name, "行数:", json.length);
+
+        const cityData = { ...detailData[selectedCity] };
+        const title = json[0] ? String(json[0].join('')) : '';
+        
+        // --- 判定：大洗町フォーマット ---
+        if (title.includes('寄附方法') || selectedCity === '大洗町') {
+          console.log("大洗形式として解析開始");
+          const yearMatch = title.match(/(20\d{2}|令和\d+)/);
+          let fYear = 2025;
+          if (yearMatch) {
+            fYear = yearMatch[0].includes('令和') ? 2018 + parseInt(yearMatch[0].replace(/\D/g, '')) : parseInt(yearMatch[0]);
+          }
+          console.log("対象年度:", fYear);
+
+          if (title.includes('年度別')) {
+            const newMonthly = [...cityData.monthly];
+            json.slice(3).forEach(row => {
+              const mName = normalizeMonth(row[0]);
+              if (!mName) return;
+              const val = cleanNum(row[2]);
+              const idx = newMonthly.findIndex(m => m.month === mName);
+              if (idx !== -1) {
+                if (fYear === 2025) newMonthly[idx].thisYear = val;
+                else if (fYear === 2024) newMonthly[idx].lastYear = val;
+                else if (fYear === 2023) newMonthly[idx].prevYear = val;
+                
+                if (newMonthly[idx].lastYear > 0) {
+                  newMonthly[idx].yoyRate = parseFloat(((newMonthly[idx].thisYear / newMonthly[idx].lastYear) * 100).toFixed(1));
+                }
+              }
+            });
+            cityData.monthly = newMonthly;
+          }
+        } 
+        // --- 判定：他自治体（標準）フォーマット ---
+        else if (json.some(r => r.includes('今年（千円）'))) {
+          console.log("標準形式(月別)として解析開始");
+          const header = json.find(r => r.includes('04月') || r.includes('4月'));
+          const rThis = json.find(r => String(r[0]).includes('今年'));
+          const rLast = json.find(r => String(r[0]).includes('前年') && !String(r[0]).includes('前々年'));
+          const rPrev = json.find(r => String(r[0]).includes('前々年'));
+
+          const newMonthly = cityData.monthly.map(m => {
+            const colIdx = header.findIndex(h => normalizeMonth(h) === m.month);
+            if (colIdx === -1) return m;
+            const thisY = cleanNum(rThis?.[colIdx]) * 1000;
+            const lastY = cleanNum(rLast?.[colIdx]) * 1000;
+            const prevY = cleanNum(rPrev?.[colIdx]) * 1000;
+            return {
+              ...m,
+              thisYear: thisY,
+              lastYear: lastY,
+              prevYear: prevY,
+              yoyRate: lastY > 0 ? parseFloat(((thisY / lastY) * 100).toFixed(1)) : 0
+            };
+          });
+          cityData.monthly = newMonthly;
+        }
+
+        // 状態更新
+        const totalCurrent = cityData.monthly.reduce((s, m) => s + m.thisYear, 0);
+        const updatedSummary = summaryData.map(c => c.name === selectedCity ? { ...c, current: totalCurrent, achievement: c.target > 0 ? Math.round((totalCurrent/c.target)*100) : 0 } : c);
+        
+        setDetailData(prev => ({ ...prev, [selectedCity]: cityData }));
+        setSummaryData(updatedSummary);
+        await saveToFirestore(updatedSummary, { [selectedCity]: cityData }, selectedCity);
+        
+        console.log("解析成功:", selectedCity, "累計額:", totalCurrent);
+        setUploadMsg('完了！');
+        setTimeout(() => setUploadMsg(''), 3000);
+
+      } catch (err) {
+        console.error("解析エラー:", err);
+        setUploadMsg('エラー発生');
       }
     };
     reader.readAsBinaryString(file);
   };
 
-  // --- グラフコンポーネント ---
-  const MonthlyChart = () => {
-    const data = detailData[selectedCity]?.monthly || [];
-    return (
-      <div className="h-[300px] w-full">
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={data} margin={{ top: 20, right: 10, left: 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" vertical={false} />
-            <XAxis dataKey="month" tick={{fontSize: 12}} />
-            <YAxis yAxisId="left" tickFormatter={v => `${(v/10000).toFixed(0)}万`} width={50} />
-            <YAxis yAxisId="right" orientation="right" unit="%" width={40} />
-            <RechartsTooltip formatter={(v, n) => [n === "昨対比" ? `${v}%` : formatCurrency(v), n]} />
-            <Legend verticalAlign="top" height={36}/>
-            <Bar yAxisId="left" dataKey="thisYear" fill="#3b82f6" name="今年(R7)" radius={[4, 4, 0, 0]} />
-            <Bar yAxisId="left" dataKey="lastYear" fill="#10b981" name="前年(R6)" radius={[4, 4, 0, 0]} />
-            <Bar yAxisId="left" dataKey="prevYear" fill="#f59e0b" name="前々年(R5)" radius={[4, 4, 0, 0]} />
-            <Line yAxisId="right" type="monotone" dataKey="yoyRate" name="昨対比" stroke="#ef4444" strokeWidth={2} dot={{ r: 4 }} />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
-    );
-  };
-
   return (
-    <div className="flex h-screen bg-slate-50 text-slate-800 font-sans overflow-hidden">
+    <div className="flex h-screen bg-slate-50 text-slate-800 overflow-hidden font-sans">
       {/* サイドバー */}
       <aside className={`bg-slate-900 text-white flex flex-col transition-all duration-300 ${isCollapsed ? 'w-20' : 'w-64'} hidden md:flex`}>
         <div className="p-6 border-b border-slate-700 flex items-center gap-3">
@@ -226,13 +252,12 @@ const App = () => {
                 <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all ${isTestMode ? 'right-0.5' : 'left-0.5'}`} />
               </button>
             </div>
-            {isTestMode && <p className="text-[10px] text-orange-300 leading-tight">データは保存されません</p>}
           </div>
           
-          <label className="block w-full cursor-pointer bg-blue-600 hover:bg-blue-500 text-center py-3 rounded-lg font-bold transition-colors">
+          <label className="block w-full cursor-pointer bg-blue-600 hover:bg-blue-500 text-center py-3 rounded-lg font-bold transition-all shadow-lg active:scale-95">
             <Upload size={18} className="inline mr-2" />
-            {!isCollapsed && "データ取込"}
-            <input type="file" className="hidden" onChange={handleFileUpload} />
+            {!isCollapsed && (uploadMsg || "データ取込")}
+            <input type="file" className="hidden" onChange={handleFileUpload} accept=".xlsx,.xls,.csv" />
           </label>
         </div>
       </aside>
@@ -240,79 +265,89 @@ const App = () => {
       {/* メイン */}
       <main className="flex-1 flex flex-col overflow-hidden">
         <header className="bg-white h-16 border-b border-slate-200 px-8 flex items-center justify-between shrink-0">
-          <h2 className="text-xl font-bold">{activeTab === 'overview' ? '全体サマリー' : '自治体別詳細'}</h2>
+          <h2 className="text-xl font-bold">{activeTab === 'overview' ? '全体サマリー' : `${selectedCity} 詳細分析`}</h2>
           <div className="flex items-center gap-4">
-            {dbStatus === 'saving' && <span className="text-xs text-orange-500 flex items-center gap-1"><RefreshCw size={12} className="animate-spin"/> 保存中...</span>}
-            {dbStatus === 'saved' && <span className="text-xs text-green-500 flex items-center gap-1"><CheckCircle size={12}/> 保存完了</span>}
+            {dbStatus === 'loading' && <span className="text-xs text-slate-400 animate-pulse">読込中...</span>}
             <div className="bg-slate-100 px-4 py-2 rounded-full text-sm font-bold flex items-center gap-2">
-              <Database size={14} /> {selectedCity}
+              <Database size={14} className="text-blue-600" /> {selectedCity}
             </div>
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-8">
+        <div className="flex-1 overflow-y-auto p-4 md:p-8">
           {activeTab === 'detail' ? (
-            <div className="max-w-6xl mx-auto space-y-8">
+            <div className="max-w-6xl mx-auto space-y-6">
               {/* セレクター */}
-              <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-wrap gap-4 items-center">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold text-slate-500">自治体:</span>
-                  <select value={selectedCity} onChange={(e) => setSelectedCity(e.target.value)} className="bg-slate-50 border border-slate-300 rounded px-3 py-1 font-bold outline-none focus:ring-2 focus:ring-blue-500">
+              <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-wrap gap-6 items-center">
+                <div className="flex items-center gap-3">
+                  <span className="text-sm font-bold text-slate-500 uppercase tracking-wider">自治体</span>
+                  <select value={selectedCity} onChange={(e) => setSelectedCity(e.target.value)} className="bg-slate-50 border border-slate-300 rounded-lg px-4 py-1.5 font-bold outline-none focus:ring-2 focus:ring-blue-500 transition-all">
                     {INITIAL_SUMMARY_DATA.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
-                  </select>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold text-slate-500">分析月:</span>
-                  <select value={selectedMonth} onChange={(e) => setSelectedMonth(parseInt(e.target.value))} className="bg-slate-50 border border-slate-300 rounded px-3 py-1 font-bold outline-none">
-                    {MONTHS_ORDER.map(m => <option key={m} value={m}>{m}月</option>)}
                   </select>
                 </div>
               </div>
 
-              {/* メインチャートエリア */}
-              <div className="grid grid-cols-1 gap-8">
-                {/* 3か年比較 */}
-                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                  <div className="flex items-center justify-between mb-6">
-                    <h3 className="text-lg font-bold flex items-center gap-2"><BarChart2 className="text-blue-500" /> 月別 寄附実績 (3か年比較)</h3>
-                    <span className="text-xs text-slate-400 font-medium">※年度別のファイルをアップロードすると各年の棒が表示されます</span>
-                  </div>
-                  <MonthlyChart />
+              {/* グラフ */}
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                <h3 className="text-lg font-bold mb-8 flex items-center gap-2 text-slate-700">
+                  <BarChart2 className="text-blue-500" /> 月別 寄附実績 (3か年比較)
+                </h3>
+                <div className="h-[400px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={detailData[selectedCity]?.monthly || []} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                      <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
+                      <YAxis yAxisId="left" axisLine={false} tickLine={false} tickFormatter={v => `${(v/10000).toFixed(0)}万`} width={60} tick={{fill: '#64748b', fontSize: 12}} />
+                      <YAxis yAxisId="right" orientation="right" unit="%" axisLine={false} tickLine={false} tick={{fill: '#ef4444', fontSize: 12}} />
+                      <RechartsTooltip 
+                        contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)'}}
+                        formatter={(v, n) => [n === "昨対比" ? `${v}%` : formatCurrency(v), n]} 
+                      />
+                      <Legend verticalAlign="top" align="right" iconType="circle" wrapperStyle={{paddingBottom: '20px'}} />
+                      <Bar yAxisId="left" dataKey="thisYear" fill="#3b82f6" name="今年(R7)" radius={[4, 4, 0, 0]} barSize={20} />
+                      <Bar yAxisId="left" dataKey="lastYear" fill="#94a3b8" name="前年(R6)" radius={[4, 4, 0, 0]} barSize={20} />
+                      <Bar yAxisId="left" dataKey="prevYear" fill="#e2e8f0" name="前々年(R5)" radius={[4, 4, 0, 0]} barSize={20} />
+                      <Line yAxisId="right" type="monotone" dataKey="yoyRate" name="昨対比" stroke="#ef4444" strokeWidth={3} dot={{ r: 4, fill: '#ef4444' }} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
                 </div>
+              </div>
 
-                {/* 下段：シェアと詳細 */}
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                   <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 min-h-[400px]">
-                      <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><PieChartIcon className="text-orange-500" /> ポータルシェア</h3>
-                      <div className="h-[300px] flex items-center justify-center text-slate-300 font-bold border-2 border-dashed border-slate-100 rounded-xl italic">
-                        日別データをアップロードすると表示されます
-                      </div>
-                   </div>
-                   <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                      <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><Target className="text-green-500" /> 月別数値一覧</h3>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-sm">
-                          <thead className="text-slate-500 border-b border-slate-100">
-                            <tr><th className="py-2 text-left">月</th><th className="py-2 text-right">今年</th><th className="py-2 text-right">前年比</th></tr>
-                          </thead>
-                          <tbody>
-                            {(detailData[selectedCity]?.monthly || []).map(m => (
-                              <tr key={m.month} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
-                                <td className="py-3 font-bold">{m.month}</td>
-                                <td className="py-3 text-right">{formatCurrency(m.thisYear)}</td>
-                                <td className={`py-3 text-right font-bold ${m.yoyRate >= 100 ? 'text-green-600' : 'text-red-500'}`}>{m.yoyRate}%</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                   </div>
+              {/* テーブル */}
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
+                  <Target className="text-green-500" /> 月別数値詳細
+                </h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="text-slate-400 text-sm border-b border-slate-100">
+                        <th className="pb-3 text-left font-medium">対象月</th>
+                        <th className="pb-3 text-right font-medium">今年度実績</th>
+                        <th className="pb-3 text-right font-medium">前年度実績</th>
+                        <th className="pb-3 text-right font-medium">昨年対比</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                      {(detailData[selectedCity]?.monthly || []).map(m => (
+                        <tr key={m.month} className="hover:bg-slate-50 transition-colors">
+                          <td className="py-4 font-bold text-slate-700">{m.month}</td>
+                          <td className="py-4 text-right font-semibold">{formatCurrency(m.thisYear)}</td>
+                          <td className="py-4 text-right text-slate-500">{formatCurrency(m.lastYear)}</td>
+                          <td className={`py-4 text-right font-bold ${m.yoyRate >= 100 ? 'text-emerald-600' : 'text-rose-500'}`}>
+                            {m.yoyRate > 0 ? `${m.yoyRate}%` : '-'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
           ) : (
-            <div className="max-w-6xl mx-auto flex items-center justify-center h-full text-slate-400 italic">
-              サマリー画面（構築中）
+            <div className="h-full flex flex-col items-center justify-center text-slate-300">
+              <PieChartIcon size={48} className="mb-4 opacity-20" />
+              <p className="font-bold italic">Summary View Coming Soon...</p>
             </div>
           )}
         </div>
